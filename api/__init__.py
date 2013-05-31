@@ -16,12 +16,19 @@ def get_connection(url_object):
         return HTTPConnection(url_object.netloc)
 
 
-# Opens a connection to a url, sends post request and returns the response.
 def send_post_request(url,message_type, header, body):
+    send_http_request(url,message_type, header, body, 'POST')
+
+def send_put_request(url,message_type, header, body):
+    send_http_request(url,message_type, header, body, 'PUT')
+
+# Opens a connection to a url, sends post request and returns the response.
+def send_http_request(url,message_type, header, body, method):
     url_object = urlparse(url)
     connection = get_connection(url_object)
-    connection.request('POST', url_object.path, body, header)
+    connection.request(method, url_object.path, body, header)
     return xml_to_dict(message_type, connection.getresponse().read())
+
 
 # checks if url contains '?' and/or '&' and returns a new url with param attached.
 def composeUrl(url, param):
@@ -67,6 +74,20 @@ class BixbyHeaders():
             'mws-hmac': self.hmac
         }
         return header
+
+
+# Creates the headers and the body to send to Bixby. returns a headers dictionary and body xml.
+def create_bixby_token(message_type,secret_key, card_acceptor, card_number, expiry_date_year,
+                         token):
+    now = strftime('%Y-%m-%dT%H:%M:%S%z', gmtime()).replace('-', '').replace('-', '').replace('T', '').replace(':',
+                                                                                                               '').replace(
+        ':', '').replace('+', '')[:-1]
+    body = TokenData( card_number, expiry_date_year, token)
+    hmac = get_mac(secret_key, 'PUT/%s/%s/%s%s%s' % ('tokenstore',card_acceptor,token, now, body.get_card_info_xml()))
+
+    #'%s/tokenstore/%s/%s'% (url, cardAcceptor, TokenData.token)
+    header = BixbyHeaders('text/xml', '*/*', now, hmac)
+    return header.getHeaderDict(), body.get_card_info_xml()
 
 
 # Creates the headers and the body to send to Bixby. returns a headers dictionary and body xml.
@@ -127,6 +148,23 @@ class CardData():
         }
         return dict_to_xml(self.message_type, dict)
 
+# Data class that holds all data Bixby requires for e-commerce token
+class TokenData():
+    def __init__(self, card_number,  expiry_date_year,
+                 token):
+        self.card_number = card_number
+        self.expiry_date_year = expiry_date_year
+        self.token = token
+
+    def get_card_info_xml(self):
+        dict = {
+            'cardNumber': self.card_number,
+            'expiryDateMMYY': self.expiry_date_year,
+            'token': self.token
+        }
+        return dict_to_xml('tokenStore', dict)
+
+
 class ReversalData():
     def __init__(self, message_type, authorizationGuid):
         self.message_type = message_type
@@ -165,6 +203,7 @@ class PaymentData():
         self.expiry_date_month = expiry_date_year[:2]
         self.expiry_date_year = expiry_date_year[-2:]
         self.card_verification_code = card_verification_code
+
 
 
 # Takes in the root element of an xml and creates a xml from the data_dict dictionary
@@ -241,6 +280,14 @@ def authorize(PaymentData):
                                                                 PaymentData.expiry_date_year,
                                                                 PaymentData.card_verification_code)
     return send_post_request('%s/web/%s/authorization' % (url, cardAcceptor),'authorization', bixbyRequestHeader, bixbyRequestBody)
+
+
+def storeToken(TokenData):
+    bixbyRequestHeader, bixbyRequestBody = create_bixby_token('tokenStore', sharedSecret, cardAcceptor,
+                                                                TokenData.card_number,
+                                                                TokenData.expiry_date_year,
+                                                                TokenData.token)
+    return send_put_request('%s/tokenstore/%s/%s'% (url, cardAcceptor, TokenData.token),'tokenStore', bixbyRequestHeader, bixbyRequestBody)
 
 
 def doPayment(PaymentData):
