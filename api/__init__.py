@@ -17,11 +17,11 @@ def get_connection(url_object):
 
 
 # Opens a connection to a url, sends post request and returns the response.
-def send_post_request(url, header, body):
+def send_post_request(url,message_type, header, body):
     url_object = urlparse(url)
     connection = get_connection(url_object)
     connection.request('POST', url_object.path, body, header)
-    return connection.getresponse()
+    return xml_to_dict(message_type, connection.getresponse().read())
 
 # checks if url contains '?' and/or '&' and returns a new url with param attached.
 def composeUrl(url, param):
@@ -81,13 +81,26 @@ def create_bixby_request(message_type,secret_key, card_acceptor, currency, amoun
     return header.getHeaderDict(), body.get_card_info_xml()
 
 # Creates the headers and the body to send to Bixby. returns a headers dictionary and body xml.
-def create_bixby_reversal(message_type,secret_key, card_acceptor, authorizationGuid):
+def create_bixby_reversal(message_type,secret_key, card_acceptor,authorizationGuid):
     now = strftime('%Y-%m-%dT%H:%M:%S%z', gmtime()).replace('-', '').replace('-', '').replace('T', '').replace(':',
                                                                                                                '').replace(
         ':', '').replace('+', '')[:-1]
     body = ReversalData(message_type, authorizationGuid)
     hmac = get_mac(secret_key, 'POST/web/%s/%s%s%s' % (card_acceptor,message_type, now, body.get_card_info_xml()))
     header = BixbyHeaders('text/xml', '*/*', now, hmac)
+    return header.getHeaderDict(), body.get_card_info_xml()
+
+
+def create_bixby_cancellation(message_type,secret_key, card_acceptor, transactionType, terminalDateTime, currency, amount):
+
+    now = strftime('%Y-%m-%dT%H:%M:%S%z', gmtime()).replace('-', '').replace('-', '').replace('T', '').replace(':',
+                                                                                                               '').replace(
+        ':', '').replace('+', '')[:-1]
+
+    body = CancellationData(transactionType, terminalDateTime, currency, amount)
+    hmac = get_mac(secret_key, 'POST/web/%s/%s%s%s' % (card_acceptor,message_type, now, body.get_card_info_xml()))
+    header = BixbyHeaders('text/xml', '*/*', now, hmac)
+
     return header.getHeaderDict(), body.get_card_info_xml()
 
 
@@ -114,7 +127,6 @@ class CardData():
         }
         return dict_to_xml(self.message_type, dict)
 
-# Data class that holds all data Bixby requires for e-commerce payment
 class ReversalData():
     def __init__(self, message_type, authorizationGuid):
         self.message_type = message_type
@@ -125,6 +137,24 @@ class ReversalData():
             'authorizationGuid': self.authorizationGuid
         }
         return dict_to_xml(self.message_type, dict)
+
+
+
+class CancellationData():
+    def __init__(self, transactionType, terminalDateTime, currency, amount):
+        self.transactionType = transactionType
+        self.terminalDateTime = terminalDateTime
+        self.currency = currency
+        self.amount = amount
+
+    def get_card_info_xml(self):
+        dict = {
+            'transactionType': self.transactionType,
+            'terminalDateTime': self.terminalDateTime,
+            'currency': self.currency,
+            'amount': self.amount
+        }
+        return dict_to_xml('cancellation', dict)
 
 
 class PaymentData():
@@ -160,17 +190,21 @@ def get_mac( secretKey, message):
     return calc_raw_hmac_sha1(secretKey, message)
 
 
-# Parses the Bixby xml response. If root node is Error it returns unsuccessful and successful if root node is payment
-def getAuthorizationGuid(response_body): #Returns 'Successful' or 'Unsuccessful' and dict with values
+def getAuthorizationGuid(response_body):
     isSuccessful, dict = parseBixbyResponse(response_body)
     return dict['authorizationGuid']
 
-def parseBixbyResponse( xml):
+def xml_to_dict(message_type, response_body):
+    isSuccessful, dict = parseBixbyResponse(message_type, response_body)
+    return dict
+
+
+def parseBixbyResponse(message_type, xml):
     #print "about to parse xml:" ,xml
     dom = parseString( xml.encode('utf-8') )
     #the result string comming from bixby is resulting in empty text nodes being created from the xml ,
     #We have to discard of these unwanted nodes.
-    root = dom.getElementsByTagName("authorization")
+    root = dom.getElementsByTagName(message_type)
     if len(root) >0: #not an error
         succsessDict = {}
         for node in root[0].childNodes:
@@ -206,7 +240,7 @@ def authorize(PaymentData):
                                                                 PaymentData.expiry_date_month,
                                                                 PaymentData.expiry_date_year,
                                                                 PaymentData.card_verification_code)
-    return send_post_request('%s/web/%s/authorization' % (url, cardAcceptor), bixbyRequestHeader, bixbyRequestBody)
+    return send_post_request('%s/web/%s/authorization' % (url, cardAcceptor),'authorization', bixbyRequestHeader, bixbyRequestBody)
 
 
 def doPayment(PaymentData):
@@ -215,8 +249,21 @@ def doPayment(PaymentData):
                                                                 PaymentData.expiry_date_month,
                                                                 PaymentData.expiry_date_year,
                                                                 PaymentData.card_verification_code)
-    return send_post_request('%s/web/%s/payment' % (url, cardAcceptor), bixbyRequestHeader, bixbyRequestBody)
+    return send_post_request('%s/web/%s/payment' % (url, cardAcceptor),'payment', bixbyRequestHeader, bixbyRequestBody)
+
+def doRefund(PaymentData):
+    bixbyRequestHeader, bixbyRequestBody = create_bixby_request('refund', sharedSecret, cardAcceptor, PaymentData.currency,
+                                                                "%.2f" % PaymentData.amount, PaymentData.card_number,
+                                                                PaymentData.expiry_date_month,
+                                                                PaymentData.expiry_date_year,
+                                                                PaymentData.card_verification_code)
+    return send_post_request('%s/web/%s/refund' % (url, cardAcceptor),'refund', bixbyRequestHeader, bixbyRequestBody)
+
 
 def authorizationReversal(authorisationGuid):
     bixbyReversalHeader, bixbyReversalBody = create_bixby_reversal('reversal', sharedSecret, cardAcceptor,authorisationGuid)
-    return send_post_request('%s/web/%s/reversal' % (url, cardAcceptor), bixbyReversalHeader, bixbyReversalBody)
+    return send_post_request('%s/web/%s/reversal' % (url, cardAcceptor),'reversal', bixbyReversalHeader, bixbyReversalBody)
+
+def authorizationCancel(transactionType, terminalDateTime, currency, amount):
+    bixbyCancellationHeader, bixbyCancellationBody = create_bixby_cancellation('cancellation', sharedSecret, cardAcceptor, transactionType, terminalDateTime, currency, amount)
+    return send_post_request('%s/web/%s/cancellation' % (url, cardAcceptor), 'cancellation', bixbyCancellationHeader, bixbyCancellationBody)
